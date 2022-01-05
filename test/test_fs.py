@@ -4,18 +4,21 @@ import filecmp
 import pytest
 
 from fs import (
+    FILENAME_SIZE,
     AddressPageWorker,
     Filesystem,
     BLOCK_SIZE,
     BLOCK_COUNT,
     MapPageWorker,
     PageType,
+    SaveResult,
     _make_block_map_page,
     ADDRESS_RECORD_COUNT_PER_PAGE,
     AddressRecord,
     LookupResult,
 )
 
+SHORT_TEST_FILE = "t"
 TEST_FILE = "testfile"
 TEST_RESULT_FILE = "test_result_file"
 
@@ -73,6 +76,43 @@ def test_address_page_saves_records():
     assert worker.list_files() == [TEST_RECORD]
 
 
+def test_empty_filename_is_not_saved(tmpdir):
+    fs_folder = Path(tmpdir.mkdir("fs_dir"))
+    test_filepath = Path(tmpdir) / TEST_FILE
+    with open(test_filepath, "w") as test_file:
+        test_file.write("LOL")
+
+    with Filesystem(fs_folder) as fs:
+        res = fs.save(test_filepath, "")
+        assert res == SaveResult.EMPTY_FILENAME
+
+
+def test_too_big_filename_is_not_saved(tmpdir):
+    fs_folder = Path(tmpdir.mkdir("fs_dir"))
+    test_filepath = Path(tmpdir) / TEST_FILE
+    with open(test_filepath, "w") as test_file:
+        test_file.write("LOL")
+
+    with Filesystem(fs_folder) as fs:
+        res = fs.save(test_filepath, "x" * (FILENAME_SIZE + 1))
+        assert res == SaveResult.FILENAME_TOO_BIG
+
+
+# def test_saved_short_filename_is_listed(tmpdir):
+#     fs_folder = Path(tmpdir.mkdir("fs_dir"))
+#     test_filepath = Path(tmpdir) / TEST_FILE
+#     with open(test_filepath, "w") as test_file:
+#         test_file.write("LOL")
+
+#     with Filesystem(fs_folder) as fs:
+#         res = fs.save(test_filepath, SHORT_TEST_FILE)
+#         assert res == SaveResult.SUCCESS
+#         assert fs.list_files() == [SHORT_TEST_FILE]
+
+#     with Filesystem(fs_folder) as fs:
+#         assert fs.list_files() == [SHORT_TEST_FILE]
+
+
 def test_saved_filename_is_listed(tmpdir):
     fs_folder = Path(tmpdir.mkdir("fs_dir"))
     test_filepath = Path(tmpdir) / TEST_FILE
@@ -80,7 +120,8 @@ def test_saved_filename_is_listed(tmpdir):
         test_file.write("LOL")
 
     with Filesystem(fs_folder) as fs:
-        fs.save(test_filepath, TEST_FILE)
+        res = fs.save(test_filepath, TEST_FILE)
+        assert res == SaveResult.SUCCESS
         assert fs.list_files() == [TEST_FILE]
 
     with Filesystem(fs_folder) as fs:
@@ -102,7 +143,8 @@ def test_saved_file_is_readable(tmpdir):
         test_file.write("LOL")
 
     with Filesystem(fs_folder) as fs:
-        fs.save(test_filepath, TEST_FILE)
+        res = fs.save(test_filepath, TEST_FILE)
+        assert res == SaveResult.SUCCESS
 
     test_result_filepath = Path(tmpdir) / TEST_RESULT_FILE
     with Filesystem(fs_folder) as fs:
@@ -119,7 +161,38 @@ def test_saved_large_file_is_readable(tmpdir):
             test_file.write(b"\01")
 
     with Filesystem(fs_folder) as fs:
-        fs.save(test_filepath, TEST_FILE)
+        res = fs.save(test_filepath, TEST_FILE)
+        assert res == SaveResult.SUCCESS
+
+    test_result_filepath = Path(tmpdir) / TEST_RESULT_FILE
+    with Filesystem(fs_folder) as fs:
+        res = fs.load(TEST_FILE, test_result_filepath)
+        assert res == LookupResult.SUCCESS
+        assert filecmp.cmp(test_filepath, test_result_filepath)
+
+
+def test_delete_removes_file_deallocates_memory(tmpdir):
+    fs_folder = Path(tmpdir.mkdir("fs_dir"))
+    test_filepath = Path(tmpdir) / TEST_FILE
+    with open(test_filepath, "wb") as test_file:
+        for _ in range(BLOCK_SIZE * 2):
+            test_file.write(b"\01")
+
+    with Filesystem(fs_folder) as fs:
+        res = fs.save(test_filepath, TEST_FILE)
+        assert res == SaveResult.SUCCESS
+
+    with Filesystem(fs_folder) as fs:
+        assert fs.list_files() == [TEST_FILE]
+        res = fs.delete(TEST_FILE)
+        assert res == LookupResult.SUCCESS
+        assert fs.list_files() == []
+
+    with open(test_filepath, "w") as test_file:
+        test_file.write("LOL")
+    with Filesystem(fs_folder) as fs:
+        res = fs.save(test_filepath, TEST_FILE)
+        assert res == SaveResult.SUCCESS
 
     test_result_filepath = Path(tmpdir) / TEST_RESULT_FILE
     with Filesystem(fs_folder) as fs:

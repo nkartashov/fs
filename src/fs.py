@@ -137,16 +137,25 @@ class BasePageWorker:
         self._is_dirty = True
 
     def set_next_page_id(self, next_page_id: int):
+        assert next_page_id > 0
+
         self._data[NEXT_PAGE_ID_OFFSET : NEXT_PAGE_ID_OFFSET + NEXT_PAGE_ID_SIZE] = i2b(
             next_page_id
         )
         self.mark_dirty()
 
     @property
-    def next_page_id(self) -> int:
-        return b2i(
+    def next_page_id(self) -> Optional[int]:
+        result = b2i(
             self._data[NEXT_PAGE_ID_OFFSET : NEXT_PAGE_ID_OFFSET + NEXT_PAGE_ID_SIZE]
         )
+        if result == MAP_PAGE_ID:
+            return None
+        return result
+
+    def cleanup(self):
+        self._data = bytearray(BLOCK_SIZE)
+        self.mark_dirty()
 
     @property
     def bytes(self) -> bytes:
@@ -175,6 +184,11 @@ class MapPageWorker(BasePageWorker):
     def allocate_data_page(self) -> int:
         """Allocates a new data page, returns its id"""
         return self._allocate(PageType.DATA_PAGE)
+
+    def deallocate_data_page(self, page_id: int):
+        self._data[PAGE_TYPE_SIZE + page_id] = PageType.UNINITIALIZED.value
+        self._parsed_blocks[PageType.DATA_PAGE].remove(page_id)
+        self.mark_dirty()
 
     def _allocate(self, page_type: PageType) -> int:
         # TODO: Handle being out of memory.
@@ -242,6 +256,21 @@ class AddressPageWorker(BasePageWorker):
 
     def list_files(self) -> List[AddressRecord]:
         return [rec for rec in self._records if rec is not None]
+
+    def delete_record(self, record: AddressRecord):
+        for i, rec in enumerate(self._records):
+            if rec == record:
+                self._records[i] = None
+                record_offset = PAGE_TYPE_SIZE + i * ADDRESS_RECORD_SIZE
+                # Unset filesize to mark as deleted.
+                self._data[
+                    record_offset
+                    + FILESIZE_OFFSET : record_offset
+                    + FILESIZE_OFFSET
+                    + FILESIZE_FIELD_SIZE
+                ] = i2b(0)
+                self.mark_dirty()
+                break
 
     def set_record(self, record_id: int, record: AddressRecord):
         self._records[record_id] = record
@@ -473,4 +502,28 @@ class Filesystem:
         return LookupResult.NOT_FOUND
 
     def delete(self, src: str) -> LookupResult:
+        if len(src) == 0:
+            return LookupResult.EMPTY_FILENAME
+
+        if len(src) > FILENAME_SIZE:
+            return LookupResult.FILENAME_TOO_BIG
+
+        with WriterContext(self._writer) as ctx:
+            map_page_worker = self._read_map_page(ctx)
+            for address_page_id in map_page_worker.get_address_pages():
+                address_page_worker = self._read_address_page(ctx, address_page_id)
+
+                for record in address_page_worker.list_files():
+                    if record.filename == src:
+                        next_block_id = record.page_id
+                        assert next_block_id is not None
+                        while next_block_id is not None:
+                            data_page_worker = self._read_data_page(ctx, next_block_id)
+                            map_page_worker.deallocate_data_page(next_block_id)
+                            next_block_id = data_page_worker.next_page_id
+                            data_page_worker.cleanup()
+
+                        address_page_worker.delete_record(record)
+                        return LookupResult.SUCCESS
+
         return LookupResult.NOT_FOUND
