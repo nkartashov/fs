@@ -143,6 +143,12 @@ class BasePageWorker:
         self.mark_dirty()
 
     @property
+    def next_page_id(self) -> int:
+        return b2i(
+            self._data[NEXT_PAGE_ID_OFFSET : NEXT_PAGE_ID_OFFSET + NEXT_PAGE_ID_SIZE]
+        )
+
+    @property
     def bytes(self) -> bytes:
         return bytes(self._data)
 
@@ -269,13 +275,23 @@ class DataPageWorker(BasePageWorker):
         assert self._data[0] == PageType.DATA_PAGE.value
 
     def set_data(self, data: bytes):
+        assert len(data) <= DATA_PER_DATA_PAGE
+
         self._data[PAGE_TYPE_SIZE:] = data
         self.mark_dirty()
+
+    def get_data(self, length: int) -> bytes:
+        assert length <= DATA_PER_DATA_PAGE
+
+        return bytes(self._data[PAGE_TYPE_SIZE : PAGE_TYPE_SIZE + length])
 
 
 class LookupResult(Enum):
     SUCCESS = 0
     NOT_FOUND = 1
+    FILENAME_TOO_BIG = 2
+    EMPTY_FILENAME = 3
+    RESULT_FILE_ALREADY_EXISTS = 4
 
 
 class SaveResult(Enum):
@@ -422,6 +438,38 @@ class Filesystem:
         return SaveResult.SUCCESS
 
     def load(self, src: str, dest: Path) -> LookupResult:
+        if len(src) == 0:
+            return LookupResult.EMPTY_FILENAME
+
+        if len(src) > FILENAME_SIZE:
+            return LookupResult.FILENAME_TOO_BIG
+
+        if dest.exists():
+            return LookupResult.RESULT_FILE_ALREADY_EXISTS
+
+        with WriterContext(self._writer) as ctx:
+            map_page_worker = self._read_map_page(ctx)
+            for address_page_id in map_page_worker.get_address_pages():
+                address_page_worker = self._read_address_page(ctx, address_page_id)
+
+                for record in address_page_worker.list_files():
+                    if record.filename == src:
+                        data_left_to_read = record.filesize
+                        next_block_id = record.page_id
+                        assert next_block_id is not None
+                        with open(dest, "wb") as result:
+                            while data_left_to_read > 0 and next_block_id is not None:
+                                data_page_worker = self._read_data_page(
+                                    ctx, next_block_id
+                                )
+                                data = data_page_worker.get_data(
+                                    min(DATA_PER_DATA_PAGE, data_left_to_read)
+                                )
+                                data_left_to_read -= len(data)
+                                result.write(data)
+                                next_block_id = data_page_worker.next_page_id
+                        return LookupResult.SUCCESS
+
         return LookupResult.NOT_FOUND
 
     def delete(self, src: str) -> LookupResult:
